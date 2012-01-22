@@ -106,9 +106,6 @@ sub mdbs_write {
             ds_type         => $ds->{type},                      # XXX use an enum
         };
 
-        if ($doc->{plugin} eq 'cpu' && $doc->{plugin_instance} == 0) { 
-            plugin_log( LOG_INFO, sprintf '%s/%s', $doc->{timestamp}, $doc->{value} );        
-        }
         try {
             my $id = $coll->insert( $doc, { safe => 1 } );
             plugin_log( LOG_DEBUG, "MongoDBStore: inserted new record: $id" );
@@ -125,6 +122,8 @@ sub mdbs_write {
 }
 
 1;
+
+__END__
 
 =head1 SYNOPSIS
 
