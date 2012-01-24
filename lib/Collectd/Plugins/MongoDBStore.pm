@@ -2,6 +2,8 @@ package Collectd::Plugins::MongoDBStore;
 
 # ABSTRACT: write to mongodb
 # XXX timeout and reconnect options
+# TODO store a document per host containing available plugins, plugin_instances
+# and type_instances. Should be okay to keep it in memory...
 
 use v5.10;
 use strict;

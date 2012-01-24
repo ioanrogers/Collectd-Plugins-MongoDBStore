@@ -10,70 +10,51 @@ use Pod::Usage;
 use Try::Tiny;
 use Getopt::Long;
 use SVG::TT::Graph::TimeSeries;
-use YAML::Any;
 use HTTP::Date;
-use Chart::Clicker;
-use Chart::Clicker::Data::Series;
-use Chart::Clicker::Data::DataSet;
-use Chart::Clicker::Renderer::Line;
-use Chart::Clicker::Axis::DateTime;
+#use Statistics::Descriptive;
+use YAML::Any;
 
 my $conn;    # connection to Mongodb server
 my $db;      # our database
 my $coll;    # our collection
-my $opt = {};
-
-sub create_clicker_chart {
-
-    my ( $data, $title ) = @_;
-
-    my $cc = Chart::Clicker->new( width => 1024, height => 768 );
-    $cc->title->text($title);
-
-    my %cc_values;
-    foreach my $d ( @{$data} ) {
-        my $k = str2time $d->[0];
-        $cc_values{$k} = $d->[1];
-    }
-    say Dump( \%cc_values );
-    my $cc_series = Chart::Clicker::Data::Series->new( \%cc_values );
-
-    my $cc_dataset = Chart::Clicker::Data::DataSet->new( series => [$cc_series] );
-    $cc->add_to_datasets($cc_dataset);
-
-    my $ctx = $cc->get_context('default');
-
-    my $dtaxis = Chart::Clicker::Axis::DateTime->new(
-        format      => '%H:%M:%S',
-        position    => 'bottom',
-        orientation => 'horizontal'
-    );
-    $ctx->domain_axis($dtaxis);
-
-    my $cc_renderer = Chart::Clicker::Renderer::Line->new;
-    $cc->set_renderer($cc_renderer);
-    $cc->write_output("$title.png");
-
-}
+my $opt = {
+    width => 800,
+    height => 600,
+};
 
 sub create_svg_chart {
     my ( $data, $title ) = @_;
     my $svgtt = SVG::TT::Graph::TimeSeries->new(
         {
-            width            => 1024,
-            height           => 768,
+            width            => $opt->{width},
+            height           => $opt->{height},
             graph_title      => $title,
             show_graph_title => 1,
+            show_data_points => 0,
+            #rollover_values  => 1, # makes huge files!
+            show_data_values => 0,
+            #show_y_title      => 1,
+            #y_title          => $opt->{plugin}, # don't know what the title is!
+            #compress        => 1, # pain in the arse for testing
+            key                   => 1,
         }
     );
-
-    $svgtt->add_data(
-        {
-            data  => $data,
-            title => $opt->{plugin},
+    
+    if (ref $data eq 'ARRAY') {
+        # only one data set, and no type_instance
+        $svgtt->add_data({
+                data  => $data,
+                title => $opt->{plugin},
+        });
+    } else {
+        foreach my $inst (keys %{$data}) {
+            $svgtt->add_data({
+                data  => $data->{$inst},
+                title => $inst,
+            });        
         }
-    );
-
+    }    
+    
     my $svg = $svgtt->burn;
     open my $fh, '>', "$title.svg"
       or die;
@@ -118,7 +99,8 @@ sub connect_to_mongo {
 
 sub get_data {
 
-    my @data;
+    my $data;
+    
     my $query = {
         host   => $opt->{host},
         plugin => $opt->{plugin},
@@ -130,35 +112,65 @@ sub get_data {
     }
 
     if ( defined $opt->{type_instance} ) {
-        $query->{type_instance} = $opt->{type_instance};
+        # set $data arrays
+        foreach my $inst (@{$opt->{type_instance}}) {
+            $data->{$inst} = [];
+        }
+        
+        # create query
+        if (scalar @{$opt->{type_instance}} == 1) {
+            # only one type
+            $query->{type_instance} = $opt->{type_instance}->[0];
+        } else {
+            $query->{type_instance} = { '$in' => $opt->{type_instance} }
+        }
+        
+    } else {
+        # no type_instance
+        $data = [];
     }
-
+    
+    say Dump($query);
+    
     my $cursor = $coll->find($query)->fields(
         {
             timestamp => 1,
             value     => 1,
+            type_instance => 1,
         }
     )->sort( { timestamp => 1, } );
 
     while ( my $object = $cursor->next ) {
-
-        #        printf "%s %s %s\n", $object->{timestamp}, $object->{value};
-        push @data, [ time2str( $object->{timestamp} ), $object->{value} ];
+        if ( ref $data eq 'HASH' ) {
+            push @{$data->{$object->{type_instance}}}, [ time2str( $object->{timestamp} ), $object->{value} ];    
+        } else {
+            push @{$data}, [ time2str( $object->{timestamp} ), $object->{value} ];
+        }
     }
 
-    return \@data;
+    return $data;
 }
 
-sub show_host_list {
+sub get_list {
+    my ($key, $query) = @_;
+    
     my $result = $db->run_command(
         [
             distinct => 'records',
-            key      => 'host',
+            key      => $key,
+            query    => $query,
         ]
     );
+    
+    return $result;    
+}
+
+sub show_host_list {
+    
+    my $result = get_list('host');
 
     say "\nAvailable hosts";
-    foreach ( @{ $result->{values} } ) {
+    foreach ( sort @{ $result->{values} } ) {
         say;
     }
 
@@ -169,17 +181,10 @@ sub show_plugin_list {
     if ( !defined $opt->{host} ) {
         pod2usage('You must specify a host to list plugins');
     }
-
-    my $result = $db->run_command(
-        [
-            distinct => 'records',
-            key      => 'plugin',
-            query    => { host => $opt->{host} },
-        ]
-    );
-
+    my $result = get_list('plugin', { host => $opt->{host} } );
+    
     say "\nAvailable plugins for " . $opt->{host};
-    foreach ( @{ $result->{values} } ) {
+    foreach ( sort @{ $result->{values} } ) {
         say;
     }
 
@@ -189,24 +194,19 @@ sub show_instance_list {
     my $type = shift;
 
     if ( !defined $opt->{host} ) {
-        pod2usage('You must specify a host to list plugin instances');
+        pod2usage( -verbose => 1, -message => 'You must specify a host to list plugin instances' );
     }
 
     if ( !defined $opt->{plugin} ) {
-        pod2usage('You must specify a plugin to list instances for');
+        pod2usage( -verbose => 1, -message => 'You must specify a plugin to list instances for' );
     }
 
     my $key = 'plugin_instance';
     if ( defined $type ) {
         $key = 'type_instance';
     }
-    my $result = $db->run_command(
-        [
-            distinct => 'records',
-            key      => $key,
-            query    => { host => $opt->{host}, plugin => $opt->{plugin} },
-        ]
-    );
+    
+    my $result = get_list($key, { host => $opt->{host}, plugin => $opt->{plugin} } );
 
     printf "\nAvailable %ss for %s/%s\n", $key, $opt->{host}, $opt->{plugin};
 
@@ -215,23 +215,36 @@ sub show_instance_list {
         return;
     }
 
-    foreach ( @{ $result->{values} } ) {
+    foreach ( sort @{ $result->{values} } ) {
         say;
     }
-
+    
 }
 
 my $getopt = GetOptions(
-    $opt,       'help|h!',           'mongohost=s', 'plugin=s',
-    'debug|D!', 'mongouser=s',       'mongopass=s', 'list=s',
-    'host=s',   'plugin_instance=s', 'type_instance=s'
+    $opt,              'help|h!', 'mongohost=s', 'mongouser=s',
+    'mongopass=s',     'host=s',  'plugin=s',    'plugin_instance=s',
+    'type_instance=s@', 'list=s', 'width|w=i', 'height|h=i',
 );
 
 if ( defined $opt->{help} ) {
-    pod2usage;
+    pod2usage(1);
 }
 
 connect_to_mongo;
+
+# check type_instances
+if ($opt->{type_instance}->[0] eq 'all') {
+    $opt->{type_instance} = []; # reset
+    
+    my $result = get_list('type_instance', { host => $opt->{host}, plugin => $opt->{plugin} });
+    foreach my $type_instance ( @{ $result->{values} } ) {
+        push @{$opt->{type_instance}}, $type_instance;
+    }
+    
+} else {
+    @{$opt->{type_instance}} = split(/,/,join(',',@{$opt->{type_instance}}));
+}
 
 if ( defined $opt->{list} ) {
     given ( $opt->{list} ) {
@@ -248,7 +261,7 @@ if ( defined $opt->{list} ) {
             show_instance_list;
         }
         default {
-            pod2usage( "Unknown 'list' value: " . $opt->{list} );
+            pod2usage( -verbose => 1, -message => "Unknown 'list' value: " . $opt->{list} );
         }
     };
     exit;
@@ -265,34 +278,96 @@ if ( !defined $opt->{plugin} ) {
 my $data = get_data;
 
 my $title = get_chart_title;
-create_clicker_chart( $data, $title );
+
+#create_clicker_chart( $data, $title );
 create_svg_chart( $data, $title );
 
 __END__
 
 =head1 SYNOPSIS
  
-timeseries.pl --host <hotname> [options]
- 
- Options:
-   --help            brief help message
-   --host            host to view, or 'list'
+timeseries.pl [options]
    
 =head1 OPTIONS
  
-=over 8
- 
-=item <b>--help</b>
+=over
+
+=item B<--help|h>
  
 Print a brief help message and exits.
  
-=item <b>--host</b>
+=item B<--host> <hostname>
  
-The host to generate a chart for. Use 'list' to show available hosts.
+Generate a chart for this host. Name is as collectd stores it, so check your settings.
 
-=item <b>--host</b>
+See B<list>.
+
+=item B<--plugin> <plugin_name>
  
-The host to generate a chart for
+The collectd plugin to get data from.
+
+Requires B<--host>.
+
+See B<list>.
+
+=item B<--plugin_instance> <plugin_instance>
+ 
+The instance of the specified plugin. e.g the B<cpu> plugin has one plugin_instance
+per CPU core.
+
+Requires B<--plugin>.
+
+See B<list>.
+
+=item B<--type_instance> <type_instance>
+ 
+The plugin's type instance. e.g. the B<cpu> plugin has type_instances for
+user, system, nice, etc.
+
+Using 'all' will use all available type_instances.
+
+See B<list>.
+
+=item B<--list> <list_type>
+ 
+Checks with MongoDB for available:
+
+=over
+
+=item * host
+
+available hostnames
+
+=item * plugin
+
+available plugins for a particular host
+( requires B<--host> )
+
+=item * plugin_instance
+
+available plugin instances for a particular host and plugin
+( requires B<--host> and B<--plugin> )
+
+=item * type_instance
+
+available type_instances for a particular host and plugin
+( requires B<--host> and B<--plugin> )
 
 =back
 
+=item B<--mongohost> <mongodb_host>
+
+Same options as MongoDB host option. Defaults to C<localhost:27017>
+
+=item B<--mongouser> <username>
+
+=item B<--mongopass> <password>
+
+If your mongod required authentication, specify the username and password here.
+
+=item B<--width> <integer>
+=item B<--height> <integer>
+
+Width and height of the chart. Defaults to 800x600
+
+=back
