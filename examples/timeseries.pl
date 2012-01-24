@@ -11,6 +11,10 @@ use Try::Tiny;
 use Getopt::Long;
 use SVG::TT::Graph::TimeSeries;
 use HTTP::Date;
+use DateTime;
+use DateTime::Format::W3CDTF;
+use DateTime::Format::Natural;
+use Number::Format;
 #use Statistics::Descriptive;
 use YAML::Any;
 
@@ -20,6 +24,8 @@ my $coll;    # our collection
 my $opt = {
     width => 800,
     height => 600,
+    from => '1 hour ago',
+    for => '1 hour',
 };
 
 sub create_svg_chart {
@@ -37,6 +43,9 @@ sub create_svg_chart {
             #y_title          => $opt->{plugin}, # don't know what the title is!
             #compress        => 1, # pain in the arse for testing
             key                   => 1,
+            y_label_formatter => sub {
+                    return Number::Format::format_number($_[0]);
+            },
         }
     );
     
@@ -100,12 +109,17 @@ sub connect_to_mongo {
 sub get_data {
 
     my $data;
+    my $dtf = DateTime::Format::W3CDTF->new;
     
     my $query = {
         host   => $opt->{host},
         plugin => $opt->{plugin},
+        timestamp => {
+            '$gte' => $opt->{from_dt}->epoch,
+            '$lte' => $opt->{to_dt}->epoch,
+        },
     };
-
+    
     # XXX check there's only one plugin instance?
     if ( defined $opt->{plugin_instance} ) {
         $query->{plugin_instance} = $opt->{plugin_instance};
@@ -141,10 +155,15 @@ sub get_data {
     )->sort( { timestamp => 1, } );
 
     while ( my $object = $cursor->next ) {
+        # convert date format for SVG:TT
+        my $dt = DateTime->from_epoch(epoch => $object->{timestamp});
+        my $date_str = $dtf->format_datetime($dt);
+        my $record = [ $date_str, $object->{value} ];
+        
         if ( ref $data eq 'HASH' ) {
-            push @{$data->{$object->{type_instance}}}, [ time2str( $object->{timestamp} ), $object->{value} ];    
+            push @{$data->{$object->{type_instance}}}, $record;
         } else {
-            push @{$data}, [ time2str( $object->{timestamp} ), $object->{value} ];
+            push @{$data}, $record;
         }
     }
 
@@ -224,7 +243,7 @@ sub show_instance_list {
 my $getopt = GetOptions(
     $opt,              'help|h!', 'mongohost=s', 'mongouser=s',
     'mongopass=s',     'host=s',  'plugin=s',    'plugin_instance=s',
-    'type_instance=s@', 'list=s', 'width|w=i', 'height|h=i',
+    'type_instance=s@', 'list=s', 'width|w=i', 'height|h=i', 'from=s', 'for=s'
 );
 
 if ( defined $opt->{help} ) {
@@ -275,11 +294,16 @@ if ( !defined $opt->{plugin} ) {
     pod2usage('Which plugin do you want to generate a chart for?');
 }
 
-my $data = get_data;
+# find out start time
+my $dtfn = DateTime::Format::Natural->new(time_zone => "local");
+$opt->{from_dt} = $dtfn->parse_datetime($opt->{from});
+$opt->{to_dt} = $opt->{from_dt}->clone->add(hours => 1);
+say $opt->{from_dt}->epoch;
+say $opt->{to_dt}->epoch;
 
+my $data = get_data;
 my $title = get_chart_title;
 
-#create_clicker_chart( $data, $title );
 create_svg_chart( $data, $title );
 
 __END__
@@ -369,5 +393,15 @@ If your mongod required authentication, specify the username and password here.
 =item B<--height> <integer>
 
 Width and height of the chart. Defaults to 800x600
+
+=item B<--from> <start_datetime>
+
+Time chart starts at, in a format recognisable to L<DateTime::Format::Natural>.
+
+Defaults to 1 hour ago.
+
+=item B<--for> <duration>
+
+Duration of time to graph. Defaults to 1 hour.
 
 =back
