@@ -15,60 +15,70 @@ use DateTime;
 use DateTime::Format::W3CDTF;
 use DateTime::Format::Natural;
 use Number::Format;
+
 #use Statistics::Descriptive;
-use YAML::Any;
+use YAML::Any qw/Dump DumpFile/;
 
 my $conn;    # connection to Mongodb server
 my $db;      # our database
 my $coll;    # our collection
 my $opt = {
-    width => 800,
+    width  => 800,
     height => 600,
-    from => '1 hour ago',
-    for => '1 hour',
+    from   => '1 hour ago',
+    for    => '1',
 };
 
 sub create_svg_chart {
     my ( $data, $title ) = @_;
-    my $svgtt = SVG::TT::Graph::TimeSeries->new(
-        {
+    my $svgtt = SVG::TT::Graph::TimeSeries->new( {
             width            => $opt->{width},
             height           => $opt->{height},
             graph_title      => $title,
             show_graph_title => 1,
-            show_data_points => 0,
-            #rollover_values  => 1, # makes huge files!
-            show_data_values => 0,
+            show_data_points => 1,
+            rollover_values  => 1, # makes huge files!
+            show_data_values => 1,
+            #stacked          => 1, # not good if you don't know what the order should be
             #show_y_title      => 1,
             #y_title          => $opt->{plugin}, # don't know what the title is!
-            #compress        => 1, # pain in the arse for testing
-            key                   => 1,
-            y_label_formatter => sub {
-                    return Number::Format::format_number($_[0]);
-            },
-        }
-    );
+            compress        => 0, # pain in the arse for testing
+            key               => 1,
+            #key_position      => 'bottom',
+            #tidy => 0, # tidying saves maybe 30% of uncompressed file size, but takes 10x longer! 
+            # it also doesn't compress any better than untidied
+            #y_label_formatter => sub {
+            #     # XXX be nice if plugins would tell us their units
+            #    return Number::Format::format_bytes( $_[0] );
+            #},
+            timescale_divisions => '10 minutes',
+            x_label_format    => '%H:%M',
+            # data_value_format => '&lt;%.2f&gt;'
+            style_sheet => 'svg.css',
+            
+    } );
     
-    if (ref $data eq 'ARRAY') {
+    if ( ref $data eq 'ARRAY' ) {
+
         # only one data set, and no type_instance
-        $svgtt->add_data({
+        $svgtt->key(0);
+        $svgtt->add_data( {
                 data  => $data,
-                title => $opt->{plugin},
-        });
+        } );
     } else {
-        foreach my $inst (keys %{$data}) {
-            $svgtt->add_data({
-                data  => $data->{$inst},
-                title => $inst,
-            });        
+        foreach my $inst ( keys %{$data} ) {
+            $svgtt->add_data( {
+                    data  => $data->{$inst},
+                    title => $inst,
+            } );
         }
-    }    
-    
+    }
+
     my $svg = $svgtt->burn;
     open my $fh, '>', "$title.svg"
       or die;
 
-    $fh->print($svg);
+    $fh->print( $svg );
     $fh->close;
 
 }
@@ -98,7 +108,7 @@ sub connect_to_mongo {
         }
     }
 
-    $conn = MongoDB::Connection->new($conn_opts);
+    $conn = MongoDB::Connection->new( $conn_opts );
 
     $db   = $conn->collectd;
     $coll = $db->records;
@@ -110,58 +120,47 @@ sub get_data {
 
     my $data;
     my $dtf = DateTime::Format::W3CDTF->new;
-    
+
     my $query = {
-        host   => $opt->{host},
-        plugin => $opt->{plugin},
+        host      => $opt->{host},
+        plugin    => $opt->{plugin},
         timestamp => {
             '$gte' => $opt->{from_dt}->epoch,
             '$lte' => $opt->{to_dt}->epoch,
         },
     };
-    
-    # XXX check there's only one plugin instance?
+
     if ( defined $opt->{plugin_instance} ) {
         $query->{plugin_instance} = $opt->{plugin_instance};
     }
 
     if ( defined $opt->{type_instance} ) {
-        # set $data arrays
-        foreach my $inst (@{$opt->{type_instance}}) {
-            $data->{$inst} = [];
-        }
-        
-        # create query
-        if (scalar @{$opt->{type_instance}} == 1) {
+        if ( scalar @{ $opt->{type_instance} } == 1 ) {
+
             # only one type
             $query->{type_instance} = $opt->{type_instance}->[0];
         } else {
-            $query->{type_instance} = { '$in' => $opt->{type_instance} }
+            $query->{type_instance} = { '$in' => $opt->{type_instance} };
         }
-        
-    } else {
-        # no type_instance
-        $data = [];
+
     }
-    
-    say Dump($query);
-    
-    my $cursor = $coll->find($query)->fields(
-        {
-            timestamp => 1,
-            value     => 1,
-            type_instance => 1,
-        }
-    )->sort( { timestamp => 1, } );
+
+    my $cursor = $coll->find( $query )->fields( {
+            timestamp       => 1,
+            value           => 1,
+            type_instance   => 1,
+            plugin_instance => 1,
+        } )->sort( { timestamp => 1, } );
 
     while ( my $object = $cursor->next ) {
-        # convert date format for SVG:TT
-        my $dt = DateTime->from_epoch(epoch => $object->{timestamp});
-        my $date_str = $dtf->format_datetime($dt);
-        my $record = [ $date_str, $object->{value} ];
         
-        if ( ref $data eq 'HASH' ) {
-            push @{$data->{$object->{type_instance}}}, $record;
+        # convert date format for SVG:TT
+        my $dt       = DateTime->from_epoch( epoch => $object->{timestamp} );
+        my $date_str = $dtf->format_datetime( $dt );
+        my $record   = [ $date_str, $object->{value} ];
+        
+        if ( defined $object->{type_instance} ) {
+            push @{ $data->{ $object->{type_instance} } }, $record;
         } else {
             push @{$data}, $record;
         }
@@ -171,22 +170,20 @@ sub get_data {
 }
 
 sub get_list {
-    my ($key, $query) = @_;
-    
-    my $result = $db->run_command(
-        [
+    my ( $key, $query ) = @_;
+
+    my $result = $db->run_command( [
             distinct => 'records',
             key      => $key,
             query    => $query,
-        ]
-    );
-    
-    return $result;    
+    ] );
+
+    return $result;
 }
 
 sub show_host_list {
-    
-    my $result = get_list('host');
+
+    my $result = get_list( 'host' );
 
     say "\nAvailable hosts";
     foreach ( sort @{ $result->{values} } ) {
@@ -198,10 +195,10 @@ sub show_host_list {
 sub show_plugin_list {
 
     if ( !defined $opt->{host} ) {
-        pod2usage('You must specify a host to list plugins');
+        pod2usage( 'You must specify a host to list plugins' );
     }
-    my $result = get_list('plugin', { host => $opt->{host} } );
-    
+    my $result = get_list( 'plugin', { host => $opt->{host} } );
+
     say "\nAvailable plugins for " . $opt->{host};
     foreach ( sort @{ $result->{values} } ) {
         say;
@@ -224,8 +221,8 @@ sub show_instance_list {
     if ( defined $type ) {
         $key = 'type_instance';
     }
-    
-    my $result = get_list($key, { host => $opt->{host}, plugin => $opt->{plugin} } );
+
+    my $result = get_list( $key, { host => $opt->{host}, plugin => $opt->{plugin} } );
 
     printf "\nAvailable %ss for %s/%s\n", $key, $opt->{host}, $opt->{plugin};
 
@@ -237,46 +234,39 @@ sub show_instance_list {
     foreach ( sort @{ $result->{values} } ) {
         say;
     }
-    
+
 }
 
 my $getopt = GetOptions(
-    $opt,              'help|h!', 'mongohost=s', 'mongouser=s',
-    'mongopass=s',     'host=s',  'plugin=s',    'plugin_instance=s',
-    'type_instance=s@', 'list=s', 'width|w=i', 'height|h=i', 'from=s', 'for=s'
+    $opt,               'help|h!', 'mongohost=s', 'mongouser=s',
+    'mongopass=s',      'host=s',  'plugin=s',    'plugin_instance=s',
+    'type_instance=s@', 'list=s',  'width|w=i',   'height|h=i',
+    'from=s',           'for=s'
 );
 
 if ( defined $opt->{help} ) {
-    pod2usage(1);
+    pod2usage( 1 );
 }
 
 connect_to_mongo;
 
 # check type_instances
-if ($opt->{type_instance}->[0] eq 'all') {
-    $opt->{type_instance} = []; # reset
-    
-    my $result = get_list('type_instance', { host => $opt->{host}, plugin => $opt->{plugin} });
-    foreach my $type_instance ( @{ $result->{values} } ) {
-        push @{$opt->{type_instance}}, $type_instance;
-    }
-    
-} else {
-    @{$opt->{type_instance}} = split(/,/,join(',',@{$opt->{type_instance}}));
+if ( defined $opt->{type_instance} ) {
+    @{ $opt->{type_instance} } = split( /,/, join( ',', @{ $opt->{type_instance} } ) );
 }
 
 if ( defined $opt->{list} ) {
     given ( $opt->{list} ) {
-        when (/^host$/i) {
+        when ( /^host$/i ) {
             show_host_list;
         }
-        when (/^plugin$/i) {
+        when ( /^plugin$/i ) {
             show_plugin_list;
         }
-        when (/^type_inst/i) {
-            show_instance_list(1);
+        when ( /^type_inst/i ) {
+            show_instance_list( 1 );
         }
-        when (/^plugin_inst/i) {
+        when ( /^plugin_inst/i ) {
             show_instance_list;
         }
         default {
@@ -287,21 +277,22 @@ if ( defined $opt->{list} ) {
 }
 
 if ( !defined $opt->{host} ) {
-    pod2usage('Which host do you want to generate a chart for?');
+    pod2usage( 'Which host do you want to generate a chart for?' );
 }
 
 if ( !defined $opt->{plugin} ) {
-    pod2usage('Which plugin do you want to generate a chart for?');
+    pod2usage( 'Which plugin do you want to generate a chart for?' );
 }
 
 # find out start time
-my $dtfn = DateTime::Format::Natural->new(time_zone => "local");
-$opt->{from_dt} = $dtfn->parse_datetime($opt->{from});
-$opt->{to_dt} = $opt->{from_dt}->clone->add(hours => 1);
+my $dtfn = DateTime::Format::Natural->new( time_zone => "local" );
+$opt->{from_dt} = $dtfn->parse_datetime( $opt->{from} );
+$opt->{to_dt} = $opt->{from_dt}->clone->add( hours => $opt->{for} );
+
 say $opt->{from_dt}->epoch;
 say $opt->{to_dt}->epoch;
 
-my $data = get_data;
+my $data  = get_data;
 my $title = get_chart_title;
 
 create_svg_chart( $data, $title );
@@ -348,7 +339,7 @@ See B<list>.
 The plugin's type instance. e.g. the B<cpu> plugin has type_instances for
 user, system, nice, etc.
 
-Using 'all' will use all available type_instances.
+By default, all available type_instances will be used.
 
 See B<list>.
 
@@ -397,11 +388,12 @@ Width and height of the chart. Defaults to 800x600
 =item B<--from> <start_datetime>
 
 Time chart starts at, in a format recognisable to L<DateTime::Format::Natural>.
+e.g. '4 hours ago', 'yesterday'
 
-Defaults to 1 hour ago.
+Defaults to '1 hour ago'.
 
-=item B<--for> <duration>
+=item B<--for> <integer>
 
-Duration of time to graph. Defaults to 1 hour.
+Duration of time to graph in hours. Defaults to 1 hour.
 
 =back
