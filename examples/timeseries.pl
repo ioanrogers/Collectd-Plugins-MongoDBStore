@@ -44,7 +44,7 @@ sub create_svg_chart {
             #y_title          => $opt->{plugin}, # don't know what the title is!
             compress        => 0, # pain in the arse for testing
             key               => 1,
-            #key_position      => 'bottom',
+            key_position      => 'bottom',
             #tidy => 0, # tidying saves maybe 30% of uncompressed file size, but takes 10x longer! 
             # it also doesn't compress any better than untidied
             #y_label_formatter => sub {
@@ -55,6 +55,8 @@ sub create_svg_chart {
             x_label_format    => '%H:%M',
             # data_value_format => '&lt;%.2f&gt;'
             style_sheet => 'svg.css',
+            min_timescale_value => $opt->{from_dt}->iso8601,
+            max_timescale_value => $opt->{to_dt}->iso8601,
             
     } );
     
@@ -119,8 +121,6 @@ sub connect_to_mongo {
 sub get_data {
 
     my $data;
-    my $dtf = DateTime::Format::W3CDTF->new;
-
     my $query = {
         host      => $opt->{host},
         plugin    => $opt->{plugin},
@@ -152,6 +152,7 @@ sub get_data {
             plugin_instance => 1,
         } )->sort( { timestamp => 1, } );
 
+    my $dtf = DateTime::Format::W3CDTF->new;
     while ( my $object = $cursor->next ) {
         
         # convert date format for SVG:TT
@@ -165,7 +166,12 @@ sub get_data {
             push @{$data}, $record;
         }
     }
-
+    
+    if (!defined $data) {
+         #no records found, but SVG::TT needs array
+         $data = [];
+    }
+    
     return $data;
 }
 
@@ -288,9 +294,6 @@ if ( !defined $opt->{plugin} ) {
 my $dtfn = DateTime::Format::Natural->new( time_zone => "local" );
 $opt->{from_dt} = $dtfn->parse_datetime( $opt->{from} );
 $opt->{to_dt} = $opt->{from_dt}->clone->add( hours => $opt->{for} );
-
-say $opt->{from_dt}->epoch;
-say $opt->{to_dt}->epoch;
 
 my $data  = get_data;
 my $title = get_chart_title;
