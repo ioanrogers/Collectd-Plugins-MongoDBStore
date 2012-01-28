@@ -21,9 +21,8 @@ plugin_register( TYPE_WRITE,  'MongoDBStore', 'mdbs_write' );
 
 my $conn;    # connection to Mongodb server
 
-# XXX should these next two be configurable?
+# XXX should this be configurable?
 my $db;      # our database
-my $coll;    # our collection
 my $needs_auth = 0;
 my $conn_opts  = {};    # MongoDB provides the defaults
 
@@ -88,18 +87,7 @@ sub mdbs_init {
         plugin_log( LOG_ERR, "MongoDBStore: connection error: $_" );
     };
 
-    $db   = $conn->collectd;
-    $coll = $db->records;
-
-    # TODO optional capped collection, with configurable size...
-    # TODO profile the indexes - timestamp is essential for read performance,
-    # not so sure about the others
-    $coll->ensure_index( { timestamp => 1 } );
-
-    #$coll->ensure_index({hostname => 1});
-    #$coll->ensure_index({plugin => 1});
-    #$coll->ensure_index({plugin_instance => 1});
-    #$coll->ensure_index({type_instance => 1});
+    $db = $conn->collectd;
 
     return 1;
 }
@@ -125,37 +113,56 @@ sub _get_ds_type_name {
     };
 }
 
+# set a per collection
+sub _get_collection {
+    my $name = shift;
+
+    # TODO check connection
+    my $coll = $db->$name;
+
+    # TODO optional capped collection, with configurable size...
+    # TODO profile the indexes - timestamp is essential for read performance,
+    # not so sure about the others
+    # TODO do I have to do this every time!!!???
+    $coll->ensure_index( { ts => 1 } );
+
+    #$coll->ensure_index({h => 1});
+    #$coll->ensure_index({i => 1});
+    #$coll->ensure_index({ti => 1});
+
+    return $coll;
+
+}
+
 sub mdbs_write {
     my ( $type, $data_set, $value_list ) = @_;
 
     # TODO utf-8 - any plugins store strings?
-    # TODO if there are multiple values, use batch_insert (\@array, $options)
-    
-    my $i = 0;
-    foreach my $ds ( @{$data_set} ) {
-        my $doc = {
-            timestamp       => $value_list->{'time'},
-            host            => $value_list->{host},
-            plugin          => $value_list->{plugin},
-            plugin_instance => $value_list->{plugin_instance},
-            type_instance   => $value_list->{type_instance},
-            interval        => $value_list->{interval},
-            value           => $value_list->{'values'}[$i],
-            type            => $type,
-            ds_name         => $ds->{name},
-            ds_type         => _get_ds_type_name( $ds->{type} ),
-        };
 
-        # XXX any performance issue with safe? Option to disable?
-        try {
-            my $id = $coll->insert( $doc, { safe => 1 } );
-            plugin_log( LOG_DEBUG, "MongoDBStore: inserted new record: $id" );
-        } catch {
-            plugin_log( LOG_ERR, "MongoDBStore: failed to insert record: $_" );
-            return 0;
-        };
-        $i++;
+    my $coll = _get_collection( $value_list->{plugin} );
+
+    my $doc = {
+        ts => $value_list->{'time'},            # CDTIME!
+        h  => $value_list->{host},
+        i  => $value_list->{plugin_instance},
+        t  => $type,
+        ti => $value_list->{type_instance},
+    };
+
+    for my $i ( 0 .. scalar @{$data_set} - 1 ) {
+        $doc->{ $data_set->[$i]->{name} } = $value_list->{'values'}[$i];
+        #ds_type         => _get_ds_type_name( $ds->{type} )
     }
+
+    try {
+        my $id = $coll->insert( $doc, { safe => 1 } );
+        plugin_log( LOG_DEBUG, "MongoDBStore: inserted new record: $id" );
+    }
+    catch {
+        plugin_log( LOG_ERR, "MongoDBStore: failed to insert record: $_" );
+        return 0;
+    };
+
     return 1;
 }
 
